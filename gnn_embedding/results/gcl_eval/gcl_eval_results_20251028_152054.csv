@@ -1,0 +1,13 @@
+Metric,Value
+silhouette_before,0.3432379961013794
+silhouette_after,0.3433063328266144
+db_before,1.028256141726098
+db_after,1.0258835816481322
+intra_mean_before,0.9998246431350708
+inter_mean_before,0.9933057427406311
+intra_mean_after,0.9998119473457336
+inter_mean_after,0.9927359223365784
+intra_gain,-1.2695789337158203e-05
+inter_change,-0.0005698204040527344
+intra_t_stat,-728.9552249305335
+intra_p_val,0.0

@@ -1,0 +1,10 @@
+{
+  "Test AUC": "0.4459 \u00b1 0.0182",
+  "Test F1 Score": "0.0000 \u00b1 0.0000",
+  "Test FocalLoss": "0.1782 \u00b1 0.0008",
+  "Test Precision": "1.0000 \u00b1 0.0000",
+  "Test Recall": "0.0000 \u00b1 0.0000",
+  "Test Hits@10": "0.0000",
+  "Test mAP": "0.4385 \u00b1 0.0102",
+  "Test Accuracy": "0.5000 \u00b1 0.0000"
+}
