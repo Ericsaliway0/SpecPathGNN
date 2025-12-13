@@ -1,6 +1,6 @@
-## A Spectral Pretraining and Attention-Based Graph Framework for Pathway Embedding and Prediction
+## A Spectral Graph Learning Framework for Pathway-Level Prediction and Explainability
 
-This repository contains the code for our paper, "A Spectral Pretraining and Attention-Based Graph Framework for Pathway Embedding and Prediction".
+This repository contains the code for our paper, "A Spectral Graph Learning Framework for Pathway-Level Prediction and Explainability".
 
 ![Alt text](images/framework.png)
 
