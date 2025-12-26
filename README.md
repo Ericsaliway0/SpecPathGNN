@@ -2,7 +2,7 @@
 
 This repository contains the code for our paper, "A Spectral Graph Learning Framework for Pathway-Level Prediction and Explainability".
 
-![Alt text](images/framework.jpeg)
+![Alt text](images/framework_overview.jpeg)
 
 ## Data resources
 The different dataset and KG used in this project are located in data directory. These files include:
