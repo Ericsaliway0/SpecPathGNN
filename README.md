@@ -40,7 +40,7 @@ The different dataset and KG used in this project are located in data directory.
    - `conda install -c dglteam dgl`
 
 6. Download the data from the built gene association graph using the link below and place it in the `data` directory before training:
-   - [Download Gene Association Data](https://drive.google.com/file/d/1riKXWv0eMa86jgAZkuFW7masb0BJ_oS4/view?usp=drive_link)
+   - [Download KG](https://drive.google.com/file/d/1riKXWv0eMa86jgAZkuFW7masb0BJ_oS4/view?usp=drive_link)
 
 7. To train the model, run the following command:
    - `python main.py --num-layers 6 --lr 0.001 --input-size 2 --hidden-size 16 --epochs 100`
