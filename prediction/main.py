@@ -22,11 +22,11 @@ if __name__ == "__main__":
     # Example 1: load from graph JSON
     # G_dgl, node_features = load_graph_data('data/neo4j_graph_pass.json')
 
-    # Example 2: load from pretrained embeddings JSON
-    G_dgl, node_features = load_graph_data(
-        'embedding/results/node_embeddings/neo4j_triplets_head1_dim128_lay2_epo20.json'
-    )
-    
+    # G_dgl, node_features = load_graph_data(
+    #     'embedding/results/node_embeddings/neo4j_triplets_head1_dim128_lay2_epo20.json'
+    #     # '../data/neo4j_triplets_head1_dim128_lay2_epo20.json'
+    # )
+    G_dgl, node_features = load_graph_data('../gat/data/neo4j_graph_pass.json')
 
     # Train and evaluate model
     train_and_evaluate(args, G_dgl, node_features)
