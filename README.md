@@ -1,6 +1,6 @@
-## A Spectral Graph Learning Framework for Pathway-Level Prediction and Explainability
+## Hierarchical Pathway Embeddings for Explainable Graph-Based Molecular Modeling
 
-This repository contains the code for our paper, "A Spectral Graph Learning Framework for Pathway-Level Prediction and Explainability".
+This repository contains the code for our paper, "Hierarchical Pathway Embeddings for Explainable Graph-Based Molecular Modeling".
 
 ![Alt text](images/framework.jpeg)
 
