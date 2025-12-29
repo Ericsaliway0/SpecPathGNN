@@ -1,5 +1,0 @@
-Graph Index,Graph Name,Num Nodes,Num Positives,Positive Ratio (%)
-0,emb_test.dgl,2745,2073,75.52
-1,emb_train.dgl,6403,4750,74.18
-
-TOTAL,,9148,6823,74.58

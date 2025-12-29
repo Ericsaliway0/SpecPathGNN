@@ -123,6 +123,15 @@ CLUSTER_COLORS = {
     16: '#7FFFD4', 17: '#FF7F50',  18: '#C71585',  19: '#20B2AA', 
     20: "#48CAE4", 21: "#90DBF4",  22: "#0077B6",  23: "#00B4D8"
 }
+CLUSTER_COLORS = {
+    0:  '#0077B6',  1:  '#0000FF',  2:  '#00B4D8',  3:  '#48EAC4',
+    4:  '#F1C0E8',  5:  '#B9FBC0',  6:  '#32CD32',  7:  '#bee1e6',
+    8:  '#8A2BE2',  9:  '#E377C2', 10: '#8EECF5', 11: '#A3C4F3',
+    12: '#FFB347', 13: '#FFD700', 14: '#FF69B4', 15: '#CD5C5C',
+    16: '#7FFFD4', 17: '#FF7F50', 18: '#C71585', 19: '#20B2AA',
+    20: '#48CAE4', 21: '#90DBF4', 22: '#0077B6', 23: '#00B4D8',
+    24: '#6A5ACD', 25: '#66CDAA', 26: '#FF8C00', 27: '#9370DB' 
+}
 
 # import os
 # import numpy as np
@@ -5393,7 +5402,7 @@ def plot_leiden_saliency_heatmap_no_epo_png(
     plt.close()
 
 
-def plot_leiden_saliency_heatmap(
+def plot_leiden_saliency_heatmap_WHITE_BACKGROUND(
     saliency_pathway_matrix,
     gene_names,
     pathway_names,
@@ -5583,7 +5592,7 @@ def plot_leiden_saliency_heatmap(
     plt.close()
 
 
-def plot_leiden_saliency_heatmap_BLACK_BACKGOUND(
+def plot_leiden_saliency_heatmap(
     saliency_pathway_matrix,
     gene_names,
     pathway_names,
