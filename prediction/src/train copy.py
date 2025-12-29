@@ -6,71 +6,35 @@ import itertools
 import dgl
 import numpy as np
 import scipy.sparse as sp
-from dgl.dataloading import GraphDataLoader
-from .models import LinkPredictor, GATModel, MLPPredictor, FocalLoss
-from .utils import (plot_scores, compute_hits_k, compute_auc, compute_f1, compute_focalloss,
-                    compute_accuracy, compute_precision, compute_recall, compute_map,
-                    compute_focalloss_with_symmetrical_confidence, compute_auc_with_symmetrical_confidence,
-                    compute_f1_with_symmetrical_confidence, compute_accuracy_with_symmetrical_confidence,
-                    compute_precision_with_symmetrical_confidence, compute_recall_with_symmetrical_confidence,
-                    compute_map_with_symmetrical_confidence)
+from .models import GCNModel, ChebNetModel, MLPPredictor, FocalLoss
+from .utils import compute_loss, compute_hits_k, compute_auc, compute_f1, compute_focalloss, compute_accuracy, compute_precision, compute_recall, compute_map, compute_focalloss_with_symmetrical_confidence, compute_auc_with_symmetrical_confidence, compute_f1_with_symmetrical_confidence, compute_accuracy_with_symmetrical_confidence, compute_precision_with_symmetrical_confidence, compute_recall_with_symmetrical_confidence, compute_map_with_symmetrical_confidence
 from scipy.stats import sem
-from torch.optim.lr_scheduler import StepLR,ExponentialLR
+import pandas as pd
+from collections import defaultdict
 
-import networkx as nx
-import community  # python-louvain
+
+from lifelines import KaplanMeierFitter
+from lifelines.statistics import logrank_test
+import matplotlib.pyplot as plt
+from lifelines import CoxPHFitter
+########################################
+# SANKEY EXPORT (SVG / PDF)
+########################################
+########################################
+# SURVIVAL ANALYSIS
+########################################
+
+from lifelines import KaplanMeierFitter
+from lifelines.statistics import logrank_test
+import matplotlib.pyplot as plt
+
+import plotly.graph_objects as go
 import numpy as np
 import os
-import json
-import torch
-import itertools
-import dgl
-import scipy.sparse as sp
-import networkx as nx
-import community  # python-louvain
-import matplotlib.pyplot as plt
-from torch.optim.lr_scheduler import ExponentialLR
+import pandas as pd
 
-def louvain_clustering_top_predictions(G_dgl, pred_scores, top_k=1000):
-    """
-    Perform Louvain clustering on the top-k predicted edges.
-    
-    Arguments:
-    - G_dgl: DGLGraph (original full graph)
-    - pred_scores: torch.Tensor of predicted scores for all edges (concatenated pos+neg)
-    - top_k: int, number of top predicted edges to use
-    
-    Returns:
-    - partition: dict mapping node -> cluster_id
-    - subgraph: nx.Graph of top-k edges
-    """
-    # Convert to CPU numpy array
-    scores = pred_scores.detach().cpu().numpy()
 
-    # Sort edges by predicted score
-    sorted_idx = np.argsort(-scores)  # descending order
-    top_idx = sorted_idx[:top_k]
-
-    # Get original edges u,v from DGL
-    u, v = G_dgl.edges()
-    u = u.cpu().numpy()
-    v = v.cpu().numpy()
-    
-    top_u = u[top_idx]
-    top_v = v[top_idx]
-
-    # Build NetworkX subgraph
-    subgraph = nx.Graph()
-    for src, dst in zip(top_u, top_v):
-        subgraph.add_edge(src, dst)
-
-    # Louvain clustering
-    partition = community.best_partition(subgraph)  # node -> cluster_id
-
-    print(f"Louvain detected {len(set(partition.values()))} clusters")
-    return partition, subgraph
-
-def train_and_evaluate(args, G_dgl, node_features):
+def train_and_evaluate_ori(args, G_dgl, node_features):
     u, v = G_dgl.edges()
     eids = np.arange(G_dgl.number_of_edges())
     eids = np.random.permutation(eids)
@@ -82,9 +46,7 @@ def train_and_evaluate(args, G_dgl, node_features):
     val_pos_u, val_pos_v = u[eids[test_size:test_size + val_size]], v[eids[test_size:test_size + val_size]]
     train_pos_u, train_pos_v = u[eids[test_size + val_size:]], v[eids[test_size + val_size:]]
 
-    ##adj = sp.coo_matrix((np.ones(len(u)), (u.numpy(), v.numpy())))
-    
-    adj = sp.coo_matrix((np.ones(len(u)), (u.numpy(), v.numpy())), shape=(G_dgl.number_of_nodes(), G_dgl.number_of_nodes()))
+    adj = sp.coo_matrix((np.ones(len(u)), (u.numpy(), v.numpy())))
     adj_neg = 1 - adj.todense() - np.eye(G_dgl.number_of_nodes())
     neg_u, neg_v = np.where(adj_neg != 0)
 
@@ -95,12 +57,9 @@ def train_and_evaluate(args, G_dgl, node_features):
 
     train_g = dgl.remove_edges(G_dgl, eids[:test_size + val_size])
 
-
-    def create_graph(u, v, num_nodes, full_node_features):
-        g = dgl.graph((u, v), num_nodes=num_nodes)
-        # Copy node features from full graph
-        g.ndata['feat'] = full_node_features
-        return g
+    def create_graph(u, v, num_nodes):
+        assert len(u) == len(v), "Source and destination nodes must have the same length"
+        return dgl.graph((u, v), num_nodes=num_nodes)
 
     train_pos_g = create_graph(train_pos_u, train_pos_v, G_dgl.number_of_nodes())
     train_neg_g = create_graph(train_neg_u, train_neg_v, G_dgl.number_of_nodes())
@@ -108,27 +67,33 @@ def train_and_evaluate(args, G_dgl, node_features):
     val_neg_g = create_graph(val_neg_u, val_neg_v, G_dgl.number_of_nodes())
     test_pos_g = create_graph(test_pos_u, test_pos_v, G_dgl.number_of_nodes())
     test_neg_g = create_graph(test_neg_u, test_neg_v, G_dgl.number_of_nodes())
+    
+    # model = GCNModel(
+    #     node_features.shape[1], 
+    #     dim_latent=args.dim_latent, 
+    #     num_layers=args.num_layers, 
+    #     do_train=True
+    # )
 
-    model = GATModel(
-        node_features.shape[1], 
-        out_feats=args.out_feats, 
-        num_layers=args.num_layers, 
-        num_heads=args.num_heads, 
-        feat_drop=args.feat_drop, 
-        attn_drop=args.attn_drop, 
+    in_feats = node_features.shape[1]
+    dim_latent = args.dim_latent
+
+    model = ChebNetModel(
+        graph=G_dgl,
+        in_feats=in_feats,
+        dim_latent=dim_latent,
+        num_layers=args.num_layers,
+        k=3,
         do_train=True
     )
+
 
     pred = MLPPredictor(args.input_size, args.hidden_size)
     criterion = FocalLoss(alpha=0.25, gamma=2.0, reduction='mean')
 
     optimizer = torch.optim.Adam(itertools.chain(model.parameters(), pred.parameters()), lr=args.lr)
 
-    # Initialize StepLR scheduler
-    ##scheduler = StepLR(optimizer, step_size=200, gamma=0.1)  # Adjust step_size and gamma as needed
-    scheduler = ExponentialLR(optimizer, gamma=0.9) 
-
-    output_path = './prediction/results/'
+    output_path = './link_prediction_gcn/results/'
     os.makedirs(output_path, exist_ok=True)
     
     train_f1_scores = []
@@ -164,18 +129,7 @@ def train_and_evaluate(args, G_dgl, node_features):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-     
-        # Update the learning rate
-        '''        
-        scheduler.step()
- 
-        # Print the current learning rate
-        if e % 200 == 0:
-            current_lr = scheduler.get_last_lr()[0]
-            print(f'Epoch {e}: Learning Rate = {current_lr:.6f}') 
         
-        '''    
-               
         if e % 5 == 0:
             print(f'In epoch {e}, loss: {loss.item()}')
 
@@ -219,8 +173,219 @@ def train_and_evaluate(args, G_dgl, node_features):
 
     epochs = range(args.epochs)
     ##epochs = list(map(int, epochs))
+  
+    # def plot_scores(epochs, train_f1_scores, val_f1_scores, train_focal_loss_scores, val_focal_loss_scores, train_auc_scores, val_auc_scores, 
+    #                 train_map_scores, val_map_scores, train_recall_scores, val_recall_scores,
+    #                 train_acc_scores, val_acc_scores, train_precision_scores, val_precision_scores,
+    #                 output_path, args):
 
-    
+    #     # Ensure the output directory exists
+    #     os.makedirs(output_path, exist_ok=True)
+
+    #     ##plt.figure(figsize=(15, 5))
+
+    #     ##plt.subplot(1, 2, 1)
+    #     plt.figure()
+    #     plt.plot(epochs, train_f1_scores, label='Training F1 Score')
+    #     plt.plot(epochs, val_f1_scores, label='Validation F1 Score')
+    #     plt.xlabel('Epochs')
+    #     plt.ylabel('F1 Score')
+    #     plt.title('Training and Validation F1 Scores over Epochs')
+    #     plt.legend()
+    #     ##plt.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+    #     plt.savefig(os.path.join(output_path, f'f1_dim{args.dim_latent}_lay{args.num_layers}_epo{args.epochs}.png'))
+
+    #     ##plt.figure(figsize=(15, 5))
+
+    #     ##plt.subplot(1, 2, 1)
+    #     plt.figure()
+    #     plt.plot(epochs, train_focal_loss_scores, label='Training FocalLoss Score')
+    #     plt.plot(epochs, val_focal_loss_scores, label='Validation FocalLoss Score')
+    #     plt.xlabel('Epochs')
+    #     plt.ylabel('FocalLoss Score')
+    #     plt.title('Training and Validation FocalLoss Scores over Epochs')
+    #     plt.legend()
+    #     ##plt.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+    #     plt.savefig(os.path.join(output_path, f'loss_dim{args.dim_latent}_lay{args.num_layers}_epo{args.epochs}.png'))
+        
+    #     ##plt.figure(figsize=(15, 5))
+
+    #     ##plt.subplot(1, 2, 1)
+    #     plt.figure()
+    #     plt.plot(epochs, train_auc_scores, label='Training AUC')
+    #     plt.plot(epochs, val_auc_scores, label='Validation AUC')
+    #     plt.xlabel('Epochs')
+    #     plt.ylabel('AUC')
+    #     plt.title('Training and Validation AUC over Epochs')
+    #     plt.legend()
+    #     ##plt.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+    #     plt.savefig(os.path.join(output_path, f'auc_dim{args.dim_latent}_lay{args.num_layers}_epo{args.epochs}.png'))
+
+    #     ##plt.figure(figsize=(15, 5))
+
+    #     ##plt.subplot(1, 2, 1)
+    #     plt.figure()
+    #     plt.plot(epochs, train_map_scores, label='Training mAP')
+    #     plt.plot(epochs, val_map_scores, label='Validation mAP')
+    #     plt.xlabel('Epochs')
+    #     plt.ylabel('mAP')
+    #     plt.title('Training and Validation mAP over Epochs')
+    #     plt.legend()
+    #     ##plt.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+    #     plt.savefig(os.path.join(output_path, f'mAP_dim{args.dim_latent}_lay{args.num_layers}_epo{args.epochs}.png'))
+
+
+    #     ##plt.figure(figsize=(15, 5))
+
+    #     ##plt.subplot(1, 2, 1)
+    #     plt.figure()
+    #     plt.plot(epochs, train_recall_scores, label='Training Recall')
+    #     plt.plot(epochs, val_recall_scores, label='Validation Recall')
+    #     plt.xlabel('Epochs')
+    #     plt.ylabel('Recall')
+    #     plt.title('Training and Validation Recall over Epochs')
+    #     plt.legend()
+    #     ##plt.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+    #     plt.savefig(os.path.join(output_path, f'recall_dim{args.dim_latent}_lay{args.num_layers}_epo{args.epochs}.png'))
+
+
+    #     ##plt.figure(figsize=(15, 5))
+
+    #     ##plt.subplot(1, 2, 1)
+    #     plt.figure()
+    #     plt.plot(epochs, train_acc_scores, label='Training Accuracy')
+    #     plt.plot(epochs, val_acc_scores, label='Validation Accuracy')
+    #     plt.xlabel('Epochs')
+    #     plt.ylabel('Accuracy')
+    #     plt.title('Training and Validation Accuracy over Epochs')
+    #     plt.legend()
+    #     ##plt.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+    #     plt.savefig(os.path.join(output_path, f'acc_dim{args.dim_latent}_lay{args.num_layers}_epo{args.epochs}.png'))
+    #     ##plt.figure(figsize=(15, 5))
+
+    #     ##plt.subplot(1, 2, 1)
+    #     plt.figure()
+    #     plt.plot(epochs, train_precision_scores, label='Training Precision')
+    #     plt.plot(epochs, val_precision_scores, label='Validation Precision')
+    #     plt.xlabel('Epochs')
+    #     plt.ylabel('Precision')
+    #     plt.title('Training and Validation Precision over Epochs')
+    #     plt.legend()
+    #     ##plt.ticklabel_format(style='sci', axis='x', scilimits=(0,0))
+    #     plt.savefig(os.path.join(output_path, f'precision_dim{args.dim_latent}_lay{args.num_layers}_epo{args.epochs}.png'))
+
+    #     plt.show()
+
+    def plot_metric(epochs, train_vals, val_vals, ylabel, title, save_path, log_scale=False):
+        """
+        Reusable helper function to generate clean metric plots.
+        """
+        plt.figure(figsize=(10, 8))
+
+        if log_scale:
+            plt.yscale("log")
+
+        plt.plot(epochs, train_vals, linewidth=2.2, label=f'Train {ylabel}')
+        plt.plot(epochs, val_vals, linewidth=2.2, label=f'Val {ylabel}')
+
+        plt.xlabel('Epochs', fontsize=14)
+        plt.ylabel(ylabel, fontsize=14)
+        plt.title(title, fontsize=16, pad=15)
+        plt.legend(frameon=False, fontsize=12)
+
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+        plt.close()
+
+
+
+    def plot_scores(
+            epochs,
+            train_f1_scores, val_f1_scores,
+            train_focal_loss_scores, val_focal_loss_scores,
+            train_auc_scores, val_auc_scores,
+            train_map_scores, val_map_scores,
+            train_recall_scores, val_recall_scores,
+            train_acc_scores, val_acc_scores,
+            train_precision_scores, val_precision_scores,
+            output_path,
+            args
+    ):
+        os.makedirs(output_path, exist_ok=True)
+
+        prefix = f"dim{args.dim_latent}_lay{args.num_layers}_epo{args.epochs}"
+
+        # --- F1 Score ---
+        plot_metric(
+            epochs,
+            train_f1_scores, val_f1_scores,
+            ylabel="F1 Score",
+            title="Training and Validation F1 Score",
+            save_path=os.path.join(output_path, f"f1_{prefix}.png")
+        )
+
+        # --- Focal Loss (log scale recommended) ---
+        plot_metric(
+            epochs,
+            train_focal_loss_scores, val_focal_loss_scores,
+            ylabel="Focal Loss",
+            title="Training and Validation Focal Loss",
+            save_path=os.path.join(output_path, f"loss_{prefix}.png"),
+            log_scale=True
+        )
+
+        # --- AUC ---
+        plot_metric(
+            epochs,
+            train_auc_scores, val_auc_scores,
+            ylabel="AUC",
+            title="Training and Validation AUC",
+            save_path=os.path.join(output_path, f"auc_{prefix}.png")
+        )
+
+        # --- mAP ---
+        plot_metric(
+            epochs,
+            train_map_scores, val_map_scores,
+            ylabel="mAP",
+            title="Training and Validation mAP",
+            save_path=os.path.join(output_path, f"map_{prefix}.png")
+        )
+
+        # --- Recall ---
+        plot_metric(
+            epochs,
+            train_recall_scores, val_recall_scores,
+            ylabel="Recall",
+            title="Training and Validation Recall",
+            save_path=os.path.join(output_path, f"recall_{prefix}.png")
+        )
+
+        # --- Accuracy ---
+        plot_metric(
+            epochs,
+            train_acc_scores, val_acc_scores,
+            ylabel="Accuracy",
+            title="Training and Validation Accuracy",
+            save_path=os.path.join(output_path, f"acc_{prefix}.png")
+        )
+
+        # --- Precision ---
+        plot_metric(
+            epochs,
+            train_precision_scores, val_precision_scores,
+            ylabel="Precision",
+            title="Training and Validation Precision",
+            save_path=os.path.join(output_path, f"precision_{prefix}.png")
+        )
+
+        print(f"✓ All plots saved to: {output_path}")
+
+    plot_scores(epochs, train_f1_scores, val_f1_scores, train_focal_loss_scores, val_focal_loss_scores, train_auc_scores, val_auc_scores, 
+        train_map_scores, val_map_scores, train_recall_scores, val_recall_scores,
+        train_acc_scores, val_acc_scores, train_precision_scores, val_precision_scores,
+        output_path, args)
+
     with torch.no_grad():
         model.eval()
         h_test = model(G_dgl, G_dgl.ndata['feat'])
@@ -237,9 +402,8 @@ def train_and_evaluate(args, G_dgl, node_features):
 
         print(f'Test AUC: {test_auc:.4f} ± {test_auc_err:.4f} | Test F1: {test_f1:.4f} ± {test_f1_err:.4f} | Test FocalLoss: {test_focal_loss:.4f} ± {test_focal_loss_err:.4f} |Test Accuracy: {test_accuracy:.4f} ± {test_accuracy_err:.4f} | Test Precision: {test_precision:.4f} ± {test_precision_err:.4f} | Test Recall: {test_recall:.4f} ± {test_recall_err:.4f} | Test mAP: {test_map:.4f} ± {test_map_err:.4f}')
 
-    model_path = './prediction/results/pred_model.pth'
+    model_path = './link_prediction_gcn/results/pred_model.pth'
     torch.save(pred.state_dict(), model_path)
-    
 
 
     test_auc = test_auc.item()
@@ -269,18 +433,16 @@ def train_and_evaluate(args, G_dgl, node_features):
         'Test Accuracy': f'{test_accuracy:.4f} ± {test_accuracy_err:.4f}'
     }
 
-    filename_ = f'test_head{args.num_heads}_lr{args.lr}_lay{args.num_layers}_input{args.input_size}_dim{args.out_feats}_epoch{args.epochs}.json'
-    
-    with open(os.path.join(output_path, filename_), 'w') as f:
+    with open(os.path.join(output_path, 'test_results.json'), 'w') as f:
         json.dump(output, f)
 
-    filename = f'test_head{args.num_heads}_lr{args.lr}_lay{args.num_layers}_input{args.input_size}_dim{args.out_feats}_epoch{args.epochs}.json'
+    filename = f'test_results_lr{args.lr}_lay{args.num_layers}_input{args.input_size}_dim{args.dim_latent}_epoch{args.epochs}.json'
     
     test_results = {
         'Learning Rate': args.lr,
         'Epochs': args.epochs,
         'Input Features': args.input_size,
-        'Output Features': args.out_feats,
+        'Output Features': args.dim_latent,
         'Test AUC': f'{test_auc:.4f} ± {test_auc_err:.4f}',
         'Test F1 Score': f'{test_f1:.4f} ± {test_f1_err:.4f}',
         'Test FocalLoss Score': f'{test_focal_loss:.4f} ± {test_focal_loss_err:.4f}',
@@ -294,223 +456,44 @@ def train_and_evaluate(args, G_dgl, node_features):
     with open(os.path.join(output_path, filename), 'w') as f:
         json.dump(test_results, f)
 
-    '''plot_scores(epochs, train_f1_scores, val_f1_scores, train_focal_loss_scores, val_focal_loss_scores, train_auc_scores, val_auc_scores, 
-        train_map_scores, val_map_scores, train_recall_scores, val_recall_scores,
-        train_acc_scores, val_acc_scores, train_precision_scores, val_precision_scores,
-        output_path, args)
-    '''
-    
 def train_and_evaluate(args, G_dgl, node_features):
-    # --- Edge splits (train/val/test) ---
+
+    import os, json, itertools
+    import numpy as np
+    import torch
+    import scipy.sparse as sp
+    import dgl
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+    from sklearn.cluster import SpectralBiclustering
+
+    ########################################
+    # 1. DATA SPLIT (UNCHANGED)
+    ########################################
+
     u, v = G_dgl.edges()
     eids = np.random.permutation(np.arange(G_dgl.number_of_edges()))
-    test_size = int(len(eids) * 0.1)
-    val_size = int(len(eids) * 0.1)
-    train_eids = eids[test_size + val_size:]
-    val_eids = eids[test_size:test_size + val_size]
-    test_eids = eids[:test_size]
 
-    def get_edge_split(eids_split):
-        return u[eids_split], v[eids_split]
-
-    train_pos_u, train_pos_v = get_edge_split(train_eids)
-    val_pos_u, val_pos_v = get_edge_split(val_eids)
-    test_pos_u, test_pos_v = get_edge_split(test_eids)
-
-    # --- Negative edges ---
-    adj = sp.coo_matrix((np.ones(len(u)), (u.numpy(), v.numpy())),
-                        shape=(G_dgl.number_of_nodes(), G_dgl.number_of_nodes()))
-    adj_neg = 1 - adj.todense() - np.eye(G_dgl.number_of_nodes())
-    neg_u, neg_v = np.where(adj_neg != 0)
-    neg_eids = np.random.choice(len(neg_u), G_dgl.number_of_edges())
-    train_neg_u, train_neg_v = neg_u[neg_eids[train_eids]], neg_v[neg_eids[train_eids]]
-    val_neg_u, val_neg_v = neg_u[neg_eids[val_eids]], neg_v[neg_eids[val_eids]]
-    test_neg_u, test_neg_v = neg_u[neg_eids[test_eids]], neg_v[neg_eids[test_eids]]
-
-    def create_graph(u, v, num_nodes):
-        return dgl.graph((u, v), num_nodes=num_nodes)
-
-    train_pos_g = create_graph(train_pos_u, train_pos_v, G_dgl.number_of_nodes())
-    train_neg_g = create_graph(train_neg_u, train_neg_v, G_dgl.number_of_nodes())
-    val_pos_g = create_graph(val_pos_u, val_pos_v, G_dgl.number_of_nodes())
-    val_neg_g = create_graph(val_neg_u, val_neg_v, G_dgl.number_of_nodes())
-    test_pos_g = create_graph(test_pos_u, test_pos_v, G_dgl.number_of_nodes())
-    test_neg_g = create_graph(test_neg_u, test_neg_v, G_dgl.number_of_nodes())
-
-    # --- Model, predictor, loss, optimizer ---
-    model = GATModel(node_features.shape[1], out_feats=args.out_feats,
-                     num_layers=args.num_layers, num_heads=args.num_heads,
-                     feat_drop=args.feat_drop, attn_drop=args.attn_drop, do_train=True)
-    pred = MLPPredictor(args.input_size, args.hidden_size)
-    criterion = FocalLoss(alpha=0.25, gamma=2.0, reduction='mean')
-    optimizer = torch.optim.Adam(itertools.chain(model.parameters(), pred.parameters()), lr=args.lr)
-    scheduler = ExponentialLR(optimizer, gamma=0.9)
-
-    output_path = './prediction/results/'
-    os.makedirs(output_path, exist_ok=True)
-
-    # --- Training loop ---
-    for e in range(args.epochs):
-        model.train()
-        h = model(train_pos_g, train_pos_g.ndata['feat'])
-        pos_score = pred(train_pos_g, h)
-        neg_score = pred(train_neg_g, h)
-        all_scores = torch.cat([pos_score, neg_score])
-        all_labels = torch.cat([torch.ones_like(pos_score), torch.zeros_like(neg_score)])
-        loss = criterion(all_scores, all_labels)
-
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-
-        if e % 5 == 0:
-            print(f'Epoch {e}, Loss: {loss.item():.4f}')
-
-    # --- Test predictions ---
-    model.eval()
-    with torch.no_grad():
-        h_test = model(G_dgl, G_dgl.ndata['feat'])
-        test_pos_score = pred(test_pos_g, h_test)
-
-    # --- Louvain clustering on top 1000 predicted edges ---
-    top_k = 1000
-    scores = test_pos_score.detach().cpu().numpy()
-    top_idx = np.argsort(-scores)[:top_k]
-    u_test, v_test = G_dgl.edges()
-    u_test, v_test = u_test.cpu().numpy(), v_test.cpu().numpy()
-    top_u, top_v = u_test[top_idx], v_test[top_idx]
-
-    subgraph = nx.Graph()
-    for src, dst in zip(top_u, top_v):
-        subgraph.add_edge(int(src), int(dst))
-
-    partition = community.best_partition(subgraph)
-    print(f"Louvain detected {len(set(partition.values()))} clusters")
-
-    # --- Save cluster assignments and edges ---
-    with open(os.path.join(output_path, 'topk_louvain_clusters.json'), 'w') as f:
-        json.dump(partition, f)
-
-    subgraph_edges = list(subgraph.edges())
-    with open(os.path.join(output_path, 'topk_subgraph_edges.json'), 'w') as f:
-        json.dump(subgraph_edges, f)
-
-    # --- Visualization ---
-    plt.figure(figsize=(12, 12))
-    pos = nx.spring_layout(subgraph, seed=42)
-    cluster_ids = list(set(partition.values()))
-    colors = plt.cm.get_cmap('tab20', len(cluster_ids))
-    node_colors = [colors(partition[node]) for node in subgraph.nodes()]
-    nx.draw_networkx(subgraph, pos, node_color=node_colors, with_labels=False, node_size=50, edge_color='gray')
-    plt.title("Top 1000 Predicted Edges Louvain Clustering")
-    plt.axis('off')
-    plt.tight_layout()
-    plt.savefig(os.path.join(output_path, 'topk_louvain_clusters.png'), dpi=300)
-    plt.show()
-
-    return partition, subgraph
-
-import os
-import json
-import torch
-import torch.nn.functional as F
-import dgl
-import numpy as np
-import networkx as nx
-import igraph as ig
-import leidenalg as la
-import matplotlib.pyplot as plt
-import itertools
-
-# ==========================
-# Load JSON embeddings
-# ==========================
-def load_graph_from_json(json_file):
-    with open(json_file, 'r') as f:
-        data = json.load(f)
-    
-    node_ids = {}
-    features = []
-    for entry in data:
-        for key in ['n', 'm']:
-            node = entry[key]
-            nid = node['identity']
-            if nid not in node_ids:
-                node_ids[nid] = len(node_ids)
-                features.append(node['properties']['embedding'])
-    
-    node_features = torch.tensor(features, dtype=torch.float32)
-    num_nodes = len(node_ids)
-    
-    src = []
-    dst = []
-    for entry in data:
-        s = node_ids[entry['r']['start']]
-        t = node_ids[entry['r']['end']]
-        src.append(s)
-        dst.append(t)
-    
-    G_dgl = dgl.graph((src, dst), num_nodes=num_nodes)
-    G_dgl.ndata['feat'] = node_features
-    
-    return G_dgl, node_features, node_ids
-
-# ==========================
-# GAT + MLP model placeholders
-# ==========================
-class GATModel(torch.nn.Module):
-    def __init__(self, in_feats, out_feats, num_layers=2, num_heads=1, feat_drop=0.0, attn_drop=0.0, do_train=True):
-        super().__init__()
-        self.layers = torch.nn.ModuleList()
-        self.layers.append(dgl.nn.GATConv(in_feats, out_feats, num_heads, feat_drop, attn_drop, activation=F.elu))
-        for _ in range(num_layers-1):
-            self.layers.append(dgl.nn.GATConv(out_feats*num_heads, out_feats, num_heads, feat_drop, attn_drop, activation=F.elu))
-        self.do_train = do_train
-
-    def forward(self, g, h):
-        for l in self.layers:
-            h = l(g, h).flatten(1)
-        return h
-
-class MLPPredictor(torch.nn.Module):
-    def __init__(self, in_feats, hidden_feats):
-        super().__init__()
-        self.fc1 = torch.nn.Linear(in_feats*2, hidden_feats)
-        self.fc2 = torch.nn.Linear(hidden_feats, 1)
-
-    def forward(self, g, h):
-        src, dst = g.edges()
-        h_cat = torch.cat([h[src], h[dst]], dim=1)
-        return torch.sigmoid(self.fc2(F.relu(self.fc1(h_cat)))).squeeze()
-
-# ==========================
-# Training function
-# ==========================
-def train_and_evaluate(args, G_dgl, node_features, top_k=1000):
-    # Split edges
-    u, v = G_dgl.edges()
-    eids = np.arange(G_dgl.number_of_edges())
-    eids = np.random.permutation(eids)
     test_size = int(len(eids) * 0.1)
     val_size = int(len(eids) * 0.1)
 
     test_pos_u, test_pos_v = u[eids[:test_size]], v[eids[:test_size]]
-    val_pos_u, val_pos_v = u[eids[test_size:test_size+val_size]], v[eids[test_size:test_size+val_size]]
-    train_pos_u, train_pos_v = u[eids[test_size+val_size:]], v[eids[test_size+val_size:]]
+    val_pos_u, val_pos_v = u[eids[test_size:test_size + val_size]], v[eids[test_size:test_size + val_size]]
+    train_pos_u, train_pos_v = u[eids[test_size + val_size:]], v[eids[test_size + val_size:]]
 
-    adj = torch.zeros(G_dgl.number_of_nodes(), G_dgl.number_of_nodes())
-    adj[u, v] = 1
-    neg_u, neg_v = torch.where(adj == 0)
-    neg_indices = np.random.choice(len(neg_u), len(u), replace=False)
-    test_neg_u, test_neg_v = neg_u[neg_indices[:test_size]], neg_v[neg_indices[:test_size]]
-    val_neg_u, val_neg_v = neg_u[neg_indices[test_size:test_size+val_size]], neg_v[neg_indices[test_size:test_size+val_size]]
-    train_neg_u, train_neg_v = neg_u[neg_indices[test_size+val_size:]], neg_v[neg_indices[test_size+val_size:]]
+    adj = sp.coo_matrix((np.ones(len(u)), (u.numpy(), v.numpy())))
+    adj_neg = 1 - adj.todense() - np.eye(G_dgl.number_of_nodes())
+    neg_u, neg_v = np.where(adj_neg != 0)
+
+    neg_eids = np.random.choice(len(neg_u), G_dgl.number_of_edges())
+    test_neg_u, test_neg_v = neg_u[neg_eids[:test_size]], neg_v[neg_eids[:test_size]]
+    val_neg_u, val_neg_v = neg_u[neg_eids[test_size:test_size + val_size]], neg_v[neg_eids[test_size:test_size + val_size]]
+    train_neg_u, train_neg_v = neg_u[neg_eids[test_size + val_size:]], neg_v[neg_eids[test_size + val_size:]]
+
+    train_g = dgl.remove_edges(G_dgl, eids[:test_size + val_size])
 
     def create_graph(u, v):
-        g = dgl.graph((u, v), num_nodes=G_dgl.number_of_nodes())
-        g.ndata['feat'] = node_features
-        return g
+        return dgl.graph((u, v), num_nodes=G_dgl.number_of_nodes())
 
     train_pos_g = create_graph(train_pos_u, train_pos_v)
     train_neg_g = create_graph(train_neg_u, train_neg_v)
@@ -519,214 +502,1559 @@ def train_and_evaluate(args, G_dgl, node_features, top_k=1000):
     test_pos_g = create_graph(test_pos_u, test_pos_v)
     test_neg_g = create_graph(test_neg_u, test_neg_v)
 
-    # Model
-    model = GATModel(node_features.shape[1], args.out_feats, args.num_layers, args.num_heads, args.feat_drop, args.attn_drop)
-    pred = MLPPredictor(args.input_size, args.hidden_size)
-    optimizer = torch.optim.Adam(itertools.chain(model.parameters(), pred.parameters()), lr=args.lr)
-    criterion = torch.nn.BCELoss()
+    ########################################
+    # 2. MODEL SETUP (UNCHANGED)
+    ########################################
 
-    # Training loop
+    model = ChebNetModel(
+        graph=G_dgl,
+        in_feats=node_features.shape[1],
+        dim_latent=args.dim_latent,
+        num_layers=args.num_layers,
+        k=3,
+        do_train=True
+    )
+
+    pred = MLPPredictor(args.input_size, args.hidden_size)
+    criterion = FocalLoss(alpha=0.25, gamma=2.0)
+    optimizer = torch.optim.Adam(
+        itertools.chain(model.parameters(), pred.parameters()),
+        lr=args.lr
+    )
+
+    output_path = "link_prediction_gcn/results/"
+    os.makedirs(output_path, exist_ok=True)
+
+    ########################################
+    # 3. TRAINING LOOP (UNCHANGED)
+    ########################################
+
     for e in range(args.epochs):
         model.train()
-        h = model(train_pos_g, train_pos_g.ndata['feat'])
+        h = model(train_g, train_g.ndata['feat'])
+
         pos_score = pred(train_pos_g, h)
         neg_score = pred(train_neg_g, h)
-        all_scores = torch.cat([pos_score, neg_score])
-        all_labels = torch.cat([torch.ones_like(pos_score), torch.zeros_like(neg_score)])
-        loss = criterion(all_scores, all_labels)
+
+        labels = torch.cat([
+            torch.ones_like(pos_score),
+            torch.zeros_like(neg_score)
+        ])
+        scores = torch.cat([pos_score, neg_score])
+
+        loss = criterion(scores, labels)
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        if e % 20 == 0:
-            print(f"Epoch {e}: Loss={loss.item():.4f}")
 
-    # Top-k predictions
-    h = model(G_dgl, node_features)
-    all_edges = [(i,j) for i in range(G_dgl.number_of_nodes()) for j in range(G_dgl.number_of_nodes()) if i!=j]
-    scores = []
-    batch_size = 10000
-    for i in range(0, len(all_edges), batch_size):
-        batch = all_edges[i:i+batch_size]
-        g_batch = dgl.graph(([u for u,v in batch], [v for u,v in batch]), num_nodes=G_dgl.number_of_nodes())
-        g_batch.ndata['feat'] = node_features
-        scores.extend(pred(g_batch, h).detach().cpu().numpy())
-    top_idx = np.argsort(scores)[-top_k:]
-    top_edges = [all_edges[i] for i in top_idx]
-    return top_edges, model, pred
-
-# ==========================
-# Leiden clustering + visualization
-# ==========================
-def leiden_clustering(top_edges, node_ids):
-    G_nx = nx.Graph()
-    id_to_node = {v:k for k,v in node_ids.items()}
-    for u,v in top_edges:
-        G_nx.add_edge(u,v)
-    G_ig = ig.Graph.from_networkx(G_nx)
-    partition = la.find_partition(G_ig, la.ModularityVertexPartition)
-    clusters = {id_to_node[i]: membership for i, membership in enumerate(partition.membership)}
-    return clusters
-
-def plot_clusters(top_edges, clusters, node_ids):
-    G_nx = nx.Graph()
-    for u,v in top_edges:
-        G_nx.add_edge(u,v)
-    colors = [clusters[u] for u in G_nx.nodes()]
-    pos = nx.spring_layout(G_nx, seed=42)
-    plt.figure(figsize=(12,12))
-    nx.draw_networkx_nodes(G_nx, pos, node_color=colors, cmap='tab20', node_size=100)
-    nx.draw_networkx_edges(G_nx, pos, alpha=0.3)
-    plt.axis('off')
-    plt.show()
-
-import torch
-import dgl
-import numpy as np
-from sklearn.metrics import f1_score, roc_auc_score
-from src.utils import MLPPredictor, GATModel, FocalLoss
-
-def train_and_evaluate(args, G_dgl, node_features, top_k=1000):
-    u, v = G_dgl.edges()
-    eids = np.arange(G_dgl.number_of_edges())
-    eids = np.random.permutation(eids)
-    test_size = int(len(eids) * 0.1)
-    val_size = int(len(eids) * 0.1)
-
-    train_pos_u, train_pos_v = u[eids[test_size+val_size:]], v[eids[test_size+val_size:]]
-    val_pos_u, val_pos_v = u[eids[test_size:test_size + val_size]], v[eids[test_size:test_size + val_size]]
-    test_pos_u, test_pos_v = u[eids[:test_size]], v[eids[:test_size]]
-
-    def create_graph(u, v, num_nodes):
-        return dgl.graph((u, v), num_nodes=num_nodes)
-
-    train_g = create_graph(train_pos_u, train_pos_v, G_dgl.number_of_nodes())
-
-    # Model setup
-    model = GATModel(node_features.shape[1], out_feats=args.out_feats,
-                     num_layers=args.num_layers, num_heads=args.num_heads,
-                     feat_drop=args.feat_drop, attn_drop=args.attn_drop, do_train=True)
-    pred = MLPPredictor(args.input_size, args.hidden_size)
-    criterion = FocalLoss(alpha=0.25, gamma=2.0, reduction='mean')
-    optimizer = torch.optim.Adam(list(model.parameters()) + list(pred.parameters()), lr=args.lr)
-
-    # Training loop
-    for e in range(args.epochs):
-        model.train()
-        h = model(train_g, train_g.ndata['feat'])
-        # Simple full positive scores for demonstration
-        pos_score = pred(train_g, h)
-        pos_labels = torch.ones_like(pos_score)
-        loss = criterion(pos_score, pos_labels)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        if e % 10 == 0:
+        if e % 5 == 0:
             print(f"Epoch {e}, Loss: {loss.item():.4f}")
 
-    # Predict all edges scores
+    ########################################
+    # 4. TESTING (UNCHANGED)
+    ########################################
+
     model.eval()
     with torch.no_grad():
-        h_test = model(G_dgl, node_features)
-        all_scores = pred(G_dgl, h_test)
+        h_test = model(G_dgl, G_dgl.ndata['feat'])
 
-    # Select top-k predictions
-    topk_indices = torch.topk(all_scores.flatten(), top_k).indices
-    edges = list(zip(u[topk_indices].tolist(), v[topk_indices].tolist()))
-    return edges
+    ########################################
+    # 5. SAVE NODE EMBEDDINGS
+    ########################################
 
-# ==========================
-# Main
-# ==========================
-'''if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--in-feats', type=int, default=128)
-    parser.add_argument('--out-feats', type=int, default=128)
-    parser.add_argument('--num-heads', type=int, default=1)
-    parser.add_argument('--num-layers', type=int, default=2)
-    parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--lr', type=float, default=0.01)
-    parser.add_argument('--input-size', type=int, default=2)
-    parser.add_argument('--hidden-size', type=int, default=16)
-    parser.add_argument('--feat-drop', type=float, default=0.0)
-    parser.add_argument('--attn-drop', type=float, default=0.0)
-    args = parser.parse_args()
+    torch.save(
+        h_test.cpu(),
+        os.path.join(output_path, "node_embeddings.pt")
+    )
 
-    json_file = 'embedding/results/node_embeddings/neo4j_triplets_head1_dim128_lay2_epo20.json'
-    G_dgl, node_features, node_ids = load_graph_from_json(json_file)
-    top_edges, model, pred = train_and_evaluate(args, G_dgl, node_features, top_k=1000)
-    clusters = leiden_clustering(top_edges, node_ids)
-    plot_clusters(top_edges, clusters, node_ids)
-'''
+    ########################################
+    # 6. NODE SALIENCY (GENE + PATHWAY)
+    ########################################
 
-import os
-import torch
-import numpy as np
-import dgl
-import networkx as nx
-import matplotlib.pyplot as plt
-from src.models import GATModel, MLPPredictor, FocalLoss  # make sure these are defined/imported
-from src.utils import compute_f1  # or other metrics if needed
+    G_dgl.ndata['feat'].requires_grad_(True)
+    h = model(G_dgl, G_dgl.ndata['feat'])
+    score = h.norm(p=2, dim=1).sum()
+    score.backward()
 
-def train_and_evaluate(args, G_dgl, node_features, top_k=1000, visualize=True):
-    u, v = G_dgl.edges()
-    eids = np.arange(G_dgl.number_of_edges())
-    np.random.shuffle(eids)
-    
-    test_size = int(len(eids) * 0.1)
-    val_size = int(len(eids) * 0.1)
-    
-    train_pos_u, train_pos_v = u[eids[test_size+val_size:]], v[eids[test_size+val_size:]]
-    val_pos_u, val_pos_v = u[eids[test_size:test_size+val_size]], v[eids[test_size:test_size+val_size]]
-    test_pos_u, test_pos_v = u[eids[:test_size]], v[eids[:test_size]]
+    node_saliency = G_dgl.ndata['feat'].grad.abs().sum(dim=1)
 
-    # === Subgraph creation with node features
-    def create_graph(u, v, num_nodes, features):
-        g = dgl.graph((u, v), num_nodes=num_nodes)
-        g.ndata['feat'] = features
-        return g
+    torch.save(
+        node_saliency.cpu(),
+        os.path.join(output_path, "node_saliency.pt")
+    )
+    
+    
 
-    train_g = create_graph(train_pos_u, train_pos_v, G_dgl.number_of_nodes(), node_features)
+    ########################################
+    # 7. PATHWAY SALIENCY AGGREGATION
+    ########################################
+
+    # pathway_saliency = torch.zeros(len(pathway_names))
+
+    # for g, pathways in gene_to_pathways.items():
+    #     for p in pathways:
+    #         pathway_saliency[p] += node_saliency[g]
+
+    # torch.save(
+    #     pathway_saliency.cpu(),
+    #     os.path.join(output_path, "pathway_saliency.pt")
+    # )
+
+    ########################################
+    # 8. EDGE-LEVEL ATTRIBUTION
+    ########################################
+
+    u_all, v_all = G_dgl.edges()
+    edge_embed = torch.cat([h_test[u_all], h_test[v_all]], dim=1)
+
+    W = list(pred.parameters())[0]
+    edge_attr = torch.abs(edge_embed @ W.T).sum(dim=1)
+
+    np.save(
+        os.path.join(output_path, "edge_attributions.npy"),
+        # edge_attr.cpu().numpy()
+        edge_attr.detach().cpu().numpy()
+
+    )
+
+    torch.save(
+        pred.state_dict(),
+        os.path.join(output_path, "predictor_weights.pt")
+    )
+
+    ########################################
+    # 8. EDGE-LEVEL INTEGRATED GRADIENTS
+    ########################################
+
+    def edge_integrated_gradients(
+        h,
+        u_idx,
+        v_idx,
+        predictor,
+        steps=50
+    ):
+        """
+        h        : node embeddings (N × d)
+        u_idx,v_idx : edge endpoints
+        predictor   : trained MLPPredictor
+        """
+        device = h.device
+
+        # Edge embedding
+        edge_embed = torch.cat([h[u_idx], h[v_idx]], dim=1)
+        baseline = torch.zeros_like(edge_embed)
+
+        total_grad = torch.zeros_like(edge_embed)
+
+        for alpha in torch.linspace(0, 1, steps, device=device):
+            interp = baseline + alpha * (edge_embed - baseline)
+            interp.requires_grad_(True)
+
+            score = predictor.forward_from_embedding(interp).sum()
+            score.backward()
+
+            total_grad += interp.grad.detach()
+
+        avg_grad = total_grad / steps
+        ig = (edge_embed - baseline) * avg_grad
+
+        # scalar attribution per edge
+        return ig.abs().sum(dim=1)
+
+    u_all, v_all = G_dgl.edges()
+
+    edge_ig = edge_integrated_gradients(
+        h_test,
+        u_all,
+        v_all,
+        pred,
+        steps=50
+    )
+
+
+    ########################################
+    # 8B. NORMALIZATION
+    ########################################
+
+    edge_ig = edge_ig.detach().cpu().numpy()
+
+    # Min–max normalization
+    edge_ig_norm = (edge_ig - edge_ig.min()) / (
+        edge_ig.max() - edge_ig.min() + 1e-9
+    )
+
+    np.save(
+        os.path.join(output_path, "edge_ig_normalized.npy"),
+        edge_ig_norm
+    )
+
+
+    ########################################
+    # 8C. TOP-K EDGES PER NODE
+    ########################################
+
+    top_k = 20
+    edge_list = list(zip(u_all.cpu().numpy(),
+                        v_all.cpu().numpy(),
+                        edge_ig_norm))
+
+    edge_list.sort(key=lambda x: x[2], reverse=True)
+
+    df_edges = pd.DataFrame(
+        edge_list[:top_k],
+        columns=["Gene_u", "Gene_v", "IG_Score"]
+    )
+
+    df_edges.to_csv(
+        os.path.join(output_path, "top_edge_attributions.csv"),
+        index=False
+    )
+
+    # ########################################
+    # # 9. SALIENCY × PATHWAY MATRIX
+    # ########################################
+
+    # saliency_matrix = np.zeros((len(pathway_names), len(gene_names)))
+
+    # for p, genes in pathway_to_genes.items():
+    #     for g in genes:
+    #         saliency_matrix[p, g] = node_saliency[g].item()
+
+    # np.save(
+    #     os.path.join(output_path, "saliency_matrix.npy"),
+    #     saliency_matrix
+    # )
+
+    ########################################
+    # 9A. LOAD PATHWAY ENRICHMENT CSV
+    ########################################
+
+    df_enrich = pd.read_csv(
+        "data/gene_gene_pairs_with_pathwayA_enrichment_unique_20_limit.csv"
+    )
+
+
+    # Keep only significant associations
+    df_enrich = df_enrich[df_enrich["significance"] == "significant"]
+
+    # Convert p-value → enrichment score
+    df_enrich["enrich_score"] = -np.log10(df_enrich["pvalue"])
+
+    # Gene / pathway names
+    gene_names = sorted(df_enrich["Gene2"].unique())
+    pathway_names = sorted(df_enrich["PathwayB"].unique())
+
+    gene_to_idx = {g: i for i, g in enumerate(gene_names)}
+    pathway_to_idx = {p: i for i, p in enumerate(pathway_names)}
+
+    # Initialize enrichment matrix (genes × pathways)
+    enrich_matrix = np.zeros((len(gene_names), len(pathway_names)))
+
+    for _, row in df_enrich.iterrows():
+        i = gene_to_idx[row["Gene2"]]
+        j = pathway_to_idx[row["PathwayB"]]
+        enrich_matrix[i, j] = row["enrich_score"]
+
+    np.save(
+        os.path.join(output_path, "gene_pathway_enrichment.npy"),
+        enrich_matrix
+    )
+
+    ########################################
+    # 9B. SALIENCY × ENRICHMENT MATRIX
+    ########################################
+
+    saliency_np = node_saliency.cpu().numpy()
+
+    # Pathway × Gene matrix
+    saliency_pathway_matrix = np.zeros(
+        (len(pathway_names), len(gene_names))
+    )
+
+    for g_name, g_idx in gene_to_idx.items():
+        for p_name, p_idx in pathway_to_idx.items():
+            saliency_pathway_matrix[p_idx, g_idx] = (
+                saliency_np[g_idx] * enrich_matrix[g_idx, p_idx]
+            )
+
+    np.save(
+        os.path.join(output_path, "saliency_enrichment_matrix.npy"),
+        saliency_pathway_matrix
+    )
+
+    ########################################
+    # 10. HEATMAP
+    ########################################
+
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(saliency_pathway_matrix, cmap="Reds", yticklabels=pathway_names)
+    plt.xlabel("Genes")
+    plt.ylabel("Pathways")
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, "saliency_pathway_heatmap.png"))
+    plt.close()
+
+    # ########################################
+    # # 11. SPECTRAL BICLUSTERING
+    # ########################################
+
+    # bicluster = SpectralBiclustering(
+    #     n_clusters=(10, 10),
+    #     method="log",
+    #     random_state=0
+    # )
+    # bicluster.fit(saliency_pathway_matrix)
+
+    # np.save(
+    #     os.path.join(output_path, "bicluster_labels.npy"),
+    #     bicluster.row_labels_
+    # )
+
+    # ########################################
+    # # 12. GENE–PATHWAY EXPLANATION TABLE
+    # ########################################
+
+    # rows = []
+    # for p in range(saliency_pathway_matrix.shape[0]):
+    #     top_genes = np.argsort(saliency_pathway_matrix[p])[::-1][:20]
+    #     for g in top_genes:
+    #         rows.append([
+    #             pathway_names[p],
+    #             gene_names[g],
+    #             saliency_pathway_matrix[p, g]
+    #         ])
+
+    # df = pd.DataFrame(rows, columns=["Pathway", "Gene", "Saliency"])
+    # df.to_csv(
+    #     os.path.join(output_path, "top_gene_pathway_pairs.csv"),
+    #     index=False
+    # )
+
+    # print("✅ Training + full interpretability pipeline completed.")
+
+    # ########################################
+    # # 13. BUILD CLUSTER → PATHWAY → GENE FLOWS
+    # ########################################
+
+
+    # top_k_genes = 10   # per pathway
+    # flows = []
+
+    # n_clusters = len(np.unique(bicluster.row_labels_))
+
+    # for p_idx, cluster_id in enumerate(bicluster.row_labels_):
+    #     pathway = pathway_names[p_idx]
+
+    #     # top genes for this pathway
+    #     gene_scores = saliency_pathway_matrix[p_idx]
+    #     top_gene_indices = np.argsort(gene_scores)[::-1][:top_k_genes]
+
+    #     for g_idx in top_gene_indices:
+    #         score = gene_scores[g_idx]
+    #         if score <= 0:
+    #             continue
+
+    #         gene = gene_names[g_idx]
+
+    #         flows.append([
+    #             f"Cluster {cluster_id}",
+    #             pathway,
+    #             gene,
+    #             score
+    #         ])
+
+    # df_flows = pd.DataFrame(
+    #     flows,
+    #     columns=["Cluster", "Pathway", "Gene", "Value"]
+    # )
+
+    # df_flows.to_csv(
+    #     os.path.join(output_path, "sankey_cluster_pathway_gene.csv"),
+    #     index=False
+    # )
+
+    ########################################
+    # 11. SPECTRAL BICLUSTERING
+    ########################################
+
+    bicluster = SpectralBiclustering(
+        n_clusters=(10, 10),
+        method="log",
+        random_state=0
+    )
+    bicluster.fit(saliency_pathway_matrix)
+
+    np.save(
+        os.path.join(output_path, "bicluster_row_labels.npy"),
+        bicluster.row_labels_
+    )
+
+    ########################################
+    # 12. GENE–PATHWAY EXPLANATION TABLE
+    ########################################
+
+    rows = []
+    for p in range(saliency_pathway_matrix.shape[0]):
+        top_genes = np.argsort(
+            saliency_pathway_matrix[p]
+        )[::-1][:20]
+
+        for g in top_genes:
+            rows.append([
+                pathway_names[p],
+                gene_names[g],
+                saliency_pathway_matrix[p, g]
+            ])
+
+    df_gp = pd.DataFrame(
+        rows,
+        columns=["Pathway", "Gene", "Saliency"]
+    )
+
+    df_gp.to_csv(
+        os.path.join(output_path, "top_gene_pathway_pairs.csv"),
+        index=False
+    )
+
+    ########################################
+    # 13. BUILD CLUSTER → PATHWAY → GENE FLOWS
+    ########################################
+
+    top_k_genes = 10
+    flows = []
+
+    for p_idx, cluster_id in enumerate(bicluster.row_labels_):
+        pathway = pathway_names[p_idx]
+        gene_scores = saliency_pathway_matrix[p_idx]
+
+        top_gene_indices = np.argsort(
+            gene_scores
+        )[::-1][:top_k_genes]
+
+        for g_idx in top_gene_indices:
+            score = gene_scores[g_idx]
+            if score <= 0:
+                continue
+
+            flows.append([
+                f"Cluster {cluster_id}",
+                pathway,
+                gene_names[g_idx],
+                score
+            ])
+
+    df_flows = pd.DataFrame(
+        flows,
+        columns=["Cluster", "Pathway", "Gene", "Value"]
+    )
+
+    df_flows.to_csv(
+        os.path.join(output_path, "sankey_cluster_pathway_gene.csv"),
+        index=False
+    )
+
+    ########################################
+    # 14. MAP GENES → CLUSTERS
+    ########################################
+
+    from collections import defaultdict
+
+    gene_cluster_map = defaultdict(list)
+
+    for p_idx, cluster_id in enumerate(bicluster.row_labels_):
+        gene_scores = saliency_pathway_matrix[p_idx]
+        top_genes = np.argsort(gene_scores)[::-1][:20]
+
+        for g in top_genes:
+            gene_cluster_map[cluster_id].append(g)
+
+    # deduplicate
+    for c in gene_cluster_map:
+        gene_cluster_map[c] = list(set(gene_cluster_map[c]))
+
+
+    surv = pd.read_csv(
+        "../ACGNN/data/TCGA-BRCA.survival.tsv",
+        sep="\t"
+    )
+
+    surv = surv.rename(columns={
+        "_PATIENT": "patient_id",
+        "OS.time": "time",
+        "OS": "event"
+    })
+
+    surv = surv.set_index("patient_id")[["time", "event"]]
+    surv["time"] = surv["time"].astype(float)
+    surv["event"] = surv["event"].astype(int)
+
+    print(f"✅ Survival loaded: {surv.shape[0]} patients")
+
+
+    ########################################
+    # LOAD EXPRESSION
+    ########################################
+
+
+    ########################################
+    # SAMPLE → PATIENT AGGREGATION (CRITICAL)
+    ########################################
+
+    expr_df = pd.read_csv(
+        "../ACGNN/data/TCGA-BRCA.expression.tsv",
+        sep="\t",
+        index_col=0
+    )
+
+    # Extract patient ID
+    expr_df.columns = [c[:12] for c in expr_df.columns]
+
+    # Aggregate multiple samples per patient (mean TPM)
+    expr_df = expr_df.groupby(expr_df.columns, axis=1).mean()
+
+    print(f"🧬 Expression patients after collapsing: {expr_df.shape[1]}")
+
+
+
+    ########################################
+    # ALIGN PATIENTS
+    ########################################
+
+    patient_ids = sorted(
+        set(expr_df.columns).intersection(surv.index)
+    )
+
+    expr_df = expr_df[patient_ids]
+    surv = surv.loc[patient_ids]
+
+    print(f"🧑 Patients used (final): {len(patient_ids)}")
+
+    ########################################
+    # ALIGN GENES (ONCE, BEFORE USING THEM)
+    ########################################
+
+    expr_genes = set(expr_df.index)
+    gnn_genes = set(gene_names)
+
+    common_genes = sorted(expr_genes.intersection(gnn_genes))
+
+    print(f"🧬 Common genes: {len(common_genes)}")
+
+
+    ########################################
+    # FILTER EXPRESSION TO COMMON GENES
+    ########################################
+
+    expr_df = expr_df.loc[common_genes]
     
-    # Model
-    model = GATModel(node_features.shape[1], out_feats=args.out_feats,
-                     num_layers=args.num_layers, num_heads=args.num_heads,
-                     feat_drop=args.feat_drop, attn_drop=args.attn_drop, do_train=True)
-    pred = MLPPredictor(args.input_size, args.hidden_size)
-    criterion = FocalLoss(alpha=0.25, gamma=2.0, reduction='mean')
-    optimizer = torch.optim.Adam(list(model.parameters()) + list(pred.parameters()), lr=args.lr)
+    ########################################
+    # GENE → EXPRESSION INDEX MAP
+    ########################################
+
+    gene_to_expr_idx = {
+        g: i for i, g in enumerate(common_genes)
+    }
+
+    expr_matrix = expr_df.T.to_numpy()
+
+    print("expr_df shape:", expr_df.shape)
+    print("expr_matrix shape:", expr_matrix.shape)
+
+    assert expr_matrix.shape == (len(patient_ids), len(common_genes))
+
+
+    # ########################################
+    # # ALIGN GENES (ONCE)
+    # ########################################
+
+    # expr_genes = set(expr_df.index)
+    # gnn_genes = set(gene_names)
+
+    # common_genes = sorted(expr_genes.intersection(gnn_genes))
+
+    # expr_df = expr_df.loc[common_genes]
+
+    # print(f"🧬 Common genes: {len(common_genes)}")
+
+
+    # ########################################
+    # # FINAL MATRIX (ONLY PLACE THIS EXISTS)
+    # ########################################
+
+    # expr_matrix = expr_df.T.to_numpy()   # patients × genes
+
+    # print("expr_df shape:", expr_df.shape)
+    # print("expr_matrix shape:", expr_matrix.shape)
+
+    # assert expr_matrix.shape == (len(patient_ids), len(common_genes))
+
+    ########################################
+    # MAP GNN GENE INDICES → EXPRESSION INDICES
+    ########################################
+
+    from collections import defaultdict
+
+    gene_cluster_map = defaultdict(set)
+
+    for p_idx, cluster_id in enumerate(bicluster.row_labels_):
+        gene_scores = saliency_pathway_matrix[p_idx]
+        top_genes = np.argsort(gene_scores)[::-1][:20]
+
+        for g_idx in top_genes:
+            gene = gene_names[g_idx]
+            if gene in gene_to_expr_idx:
+                gene_cluster_map[cluster_id].add(
+                    gene_to_expr_idx[gene]
+                )
+
+    # convert sets → lists
+    gene_cluster_map = {
+        c: list(idxs) for c, idxs in gene_cluster_map.items()
+    }
+
+
+    # ########################################
+    # # 15. PATIENT × CLUSTER SCORE MATRIX
+    # ########################################
+
+    # patient_cluster_scores = {}
+
+    # for cluster_id, gene_idxs in gene_cluster_map.items():
+    #     patient_cluster_scores[f"Cluster {cluster_id}"] = (
+    #         expr_matrix[:, gene_idxs].mean(axis=1)
+    #     )
+
+    # patient_cluster_scores = pd.DataFrame(
+    #     patient_cluster_scores,
+    #     index=patient_ids
+    # )
+
+    # patient_cluster_scores.to_csv(
+    #     os.path.join(output_path, "patient_cluster_scores.csv")
+    # )
+
+
+    ########################################
+    # PATIENT × CLUSTER SCORE MATRIX (SAFE)
+    ########################################
     
-    # === Training loop
-    for e in range(args.epochs):
-        model.train()
-        h = model(train_g, train_g.ndata['feat'])
-        pos_score = pred(train_g, h)
-        pos_labels = torch.ones_like(pos_score)
-        loss = criterion(pos_score, pos_labels)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        if e % 10 == 0:
-            print(f"Epoch {e}, Loss: {loss.item():.4f}")
+
+    patient_cluster_scores = {}
+
+    for cluster_id, gene_idxs in gene_cluster_map.items():
+        if len(gene_idxs) == 0:
+            continue
+
+        patient_cluster_scores[f"Cluster {cluster_id}"] = (
+            expr_matrix[:, gene_idxs].mean(axis=1)
+        )
+
+    patient_cluster_scores = pd.DataFrame(
+        patient_cluster_scores,
+        index=patient_ids
+    )
+
+    assert patient_cluster_scores.shape[0] == len(patient_ids)
     
-    # === Top-k edge prediction
-    model.eval()
-    with torch.no_grad():
-        h_test = model(G_dgl, node_features)
-        all_scores = pred(G_dgl, h_test).flatten()
-        topk_indices = torch.topk(all_scores, top_k).indices
-        top_edges = list(zip(u[topk_indices].tolist(), v[topk_indices].tolist()))
+    df_surv = surv.join(patient_cluster_scores, how="inner")
+
+    ########################################
+    # 16. LOAD TCGA-BRCA SURVIVAL DATA
+    ########################################
+
+    ########################################
+    # LOAD SURVIVAL (ROBUST)
+    ########################################
+
+    surv = pd.read_csv(
+        "../ACGNN/data/TCGA-BRCA.survival.tsv",
+        sep="\t"
+    )
+
+    print("Survival columns (raw):", surv.columns.tolist())
+
+    # Rename ONLY if needed
+    if "_PATIENT" in surv.columns:
+        surv = surv.rename(columns={"_PATIENT": "patient_id"})
+    if "OS.time" in surv.columns:
+        surv = surv.rename(columns={"OS.time": "time"})
+    if "OS" in surv.columns:
+        surv = surv.rename(columns={"OS": "event"})
+
+    # Set index ONLY if needed
+    if "patient_id" in surv.columns:
+        surv = surv.set_index("patient_id")
+
+    # Keep only required columns
+    surv = surv[["time", "event"]]
+
+    # Enforce dtypes
+    surv["time"] = surv["time"].astype(float)
+    surv["event"] = surv["event"].astype(int)
+
+    print(f"✅ Survival loaded: {surv.shape[0]} patients")
+
+
+    ########################################
+    # 17. HIGH / LOW STRATIFICATION
+    ########################################
+
+    cluster_cols = patient_cluster_scores.columns
+
+    for c in cluster_cols:
+        df_surv[f"{c}_group"] = (
+            df_surv[c] >= df_surv[c].median()
+        ).map({True: "High", False: "Low"})
+
+    ########################################
+    # 18. KAPLAN–MEIER SURVIVAL ANALYSIS
+    ########################################
+
+
+    km_dir = os.path.join(output_path, "KM_plots")
+    os.makedirs(km_dir, exist_ok=True)
+
+    def plot_km(df, cluster):
+        kmf = KaplanMeierFitter()
+        plt.figure(figsize=(5, 4))
+
+        for grp in ["High", "Low"]:
+            mask = df[f"{cluster}_group"] == grp
+            kmf.fit(
+                df.loc[mask, "time"],
+                df.loc[mask, "event"],
+                label=f"{cluster} {grp}"
+            )
+            kmf.plot_survival_function(ci_show=False)
+
+        g1 = df[f"{cluster}_group"] == "High"
+        g2 = df[f"{cluster}_group"] == "Low"
+
+        res = logrank_test(
+            df.loc[g1, "time"],
+            df.loc[g2, "time"],
+            df.loc[g1, "event"],
+            df.loc[g2, "event"]
+        )
+
+        plt.title(
+            f"{cluster}\nLog-rank p = {res.p_value:.2e}"
+        )
+        plt.xlabel("Days")
+        plt.ylabel("Overall Survival")
+
+        plt.tight_layout()
+        plt.savefig(
+            os.path.join(km_dir, f"KM_{cluster}.pdf")
+        )
+        plt.close()
+
+    for c in cluster_cols:
+        plot_km(df_surv, c)
+
+    ########################################
+    # 19. COX PROPORTIONAL HAZARDS (UNIVARIATE)
+    ########################################
+
+    cox_results = []
+
+    for c in cluster_cols:
+        df_tmp = df_surv[["time", "event", c]].dropna()
+        cph = CoxPHFitter()
+        cph.fit(
+            df_tmp,
+            duration_col="time",
+            event_col="event"
+        )
+
+        s = cph.summary.loc[c]
+        cox_results.append({
+            "Cluster": c,
+            "HR": s["exp(coef)"],
+            "CI_lower": s["exp(coef) lower 95%"],
+            "CI_upper": s["exp(coef) upper 95%"],
+            "p": s["p"]
+        })
+
+    df_cox = pd.DataFrame(cox_results).sort_values("p")
+    df_cox.to_csv(
+        os.path.join(output_path, "cox_univariate_clusters.csv"),
+        index=False
+    )
+
+    print("✅ Biclustering → Sankey → Survival pipeline completed.")
+
+
+
+    ########################################
+    # 20. PATHWAY → FAMILY MAP
+    ########################################
+
+    PATHWAY_FAMILY_MAP = {
+        "PI3K-AKT signaling pathway": "PI3K/AKT",
+        "mTOR signaling pathway": "PI3K/AKT",
+        "MAPK signaling pathway": "MAPK",
+        "ERK cascade": "MAPK",
+        "p53 signaling pathway": "Cell Cycle / DNA Damage",
+        "Cell cycle": "Cell Cycle / DNA Damage",
+        "DNA repair": "Cell Cycle / DNA Damage",
+    }
+
+    def map_to_family(pathway):
+        return PATHWAY_FAMILY_MAP.get(pathway, "Other")
+
+    ########################################
+    # 21. PATIENT × PATHWAY SCORES (FIXED)
+    ########################################
+
+    patient_pathway_scores = {}
+
+    for p_idx, pathway in enumerate(pathway_names):
+        gene_scores = saliency_pathway_matrix[p_idx]
+        top_gene_idxs = np.argsort(gene_scores)[::-1][:20]
+
+        expr_gene_idxs = []
+
+        for g_idx in top_gene_idxs:
+            gene = gene_names[g_idx]
+            if gene in gene_to_expr_idx:
+                expr_gene_idxs.append(gene_to_expr_idx[gene])
+
+        # skip empty pathways
+        if len(expr_gene_idxs) == 0:
+            continue
+
+        patient_pathway_scores[pathway] = (
+            expr_matrix[:, expr_gene_idxs].mean(axis=1)
+        )
+
+        patient_pathway_scores = pd.DataFrame(
+            patient_pathway_scores,
+            index=patient_ids
+        )
+
+
+
+    ########################################
+    # 22. PATIENT × PATHWAY-FAMILY SCORES
+    ########################################
+
+    # Map each pathway to a family
+    pathway_to_family = {
+        p: map_to_family(p)
+        for p in patient_pathway_scores.columns
+    }
+
+    # Build patient × family matrix
+    patient_family_scores = {}
+
+    for family in sorted(set(pathway_to_family.values())):
+        family_pathways = [
+            p for p, f in pathway_to_family.items() if f == family
+        ]
+
+        # mean across pathways in the family
+        patient_family_scores[family] = (
+            patient_pathway_scores[family_pathways].mean(axis=1)
+        )
+
+    patient_family_scores = pd.DataFrame(
+        patient_family_scores,
+        index=patient_ids
+    )
+
+    print("🧬 Pathway-family matrix shape:", patient_family_scores.shape)
+
+
+    ########################################
+    # 23. MERGE WITH SURVIVAL
+    ########################################
+
+    df_family_surv = surv.join(
+        patient_family_scores,
+        how="inner"
+    )
+
+    print("🧑 Patients for Cox:", df_family_surv.shape[0])
+
+
+
+    ########################################
+    # 24. COX REGRESSION (PATHWAY FAMILIES)
+    ########################################
+
+    from lifelines import CoxPHFitter
+
+    cox_family_results = []
+
+    for family in patient_family_scores.columns:
+        df_tmp = df_family_surv[["time", "event", family]].dropna()
+
+        # skip degenerate cases
+        if df_tmp[family].std() == 0:
+            continue
+
+        cph = CoxPHFitter()
+        cph.fit(
+            df_tmp,
+            duration_col="time",
+            event_col="event"
+        )
+
+        s = cph.summary.loc[family]
+
+        cox_family_results.append({
+            "Family": family,
+            "HR": s["exp(coef)"],
+            "CI_lower": s["exp(coef) lower 95%"],
+            "CI_upper": s["exp(coef) upper 95%"],
+            "p": s["p"]
+        })
+
+    df_cox_family = pd.DataFrame(cox_family_results)
+
+
+    ########################################
+    # 25. FDR CORRECTION
+    ########################################
+
+    from statsmodels.stats.multitest import multipletests
+
+    df_cox_family["FDR"] = multipletests(
+        df_cox_family["p"],
+        method="fdr_bh"
+    )[1]
+
+    df_cox_family = df_cox_family.sort_values("p")
+
+    df_cox_family.to_csv(
+        os.path.join(output_path, "cox_pathway_families.csv"),
+        index=False
+    )
+
+    print("✅ Pathway-family Cox results saved.")
+
+    ########################################
+    # 26. FOREST PLOT
+    ########################################
+
+    import matplotlib.pyplot as plt
+
+    df_plot = df_cox_family.copy()
+    df_plot["logHR"] = np.log(df_plot["HR"])
+
+    plt.figure(figsize=(6, 0.5 * len(df_plot)))
+
+    y = np.arange(len(df_plot))
+
+    plt.errorbar(
+        df_plot["HR"],
+        y,
+        xerr=[
+            df_plot["HR"] - df_plot["CI_lower"],
+            df_plot["CI_upper"] - df_plot["HR"]
+        ],
+        fmt="o",
+        color="black",
+        ecolor="black",
+        capsize=3
+    )
+
+    plt.axvline(1, linestyle="--", color="red")
+
+    plt.yticks(
+        y,
+        df_plot["Family"]
+    )
+
+    plt.xlabel("Hazard Ratio")
+    plt.title("Pathway-Family Cox Regression")
+
+    plt.tight_layout()
+    plt.savefig(
+        os.path.join(output_path, "cox_pathway_family_forest.pdf")
+    )
+    plt.close()
+
+    print("✅ Forest plot saved.")
+
+
+
+
+
+
+    ########################################
+    # 22. PATIENT × PATHWAY-FAMILY SCORES
+    ########################################
+
+    family_scores = {}
+
+    for pathway, scores in patient_pathway_scores.items():
+        fam = map_to_family(pathway)
+        if fam not in family_scores:
+            family_scores[fam] = []
+        family_scores[fam].append(scores)
+
+    patient_family_scores = {
+        fam: pd.concat(vals, axis=1).mean(axis=1)
+        for fam, vals in family_scores.items()
+    }
+
+    patient_family_scores = pd.DataFrame(patient_family_scores)
+    patient_family_scores.index = patient_ids
+
+    patient_family_scores.to_csv(
+        os.path.join(output_path, "patient_pathway_family_scores.csv")
+    )
+
+
+
+    ########################################
+    # 23. MERGE WITH SURVIVAL
+    ########################################
+
+    df_fam_surv = surv.join(
+        patient_family_scores,
+        how="inner"
+    )
+
+    family_cols = patient_family_scores.columns
+
+
+
+    ########################################
+    # 24. FAMILY STRATIFICATION
+    ########################################
+
+    for f in family_cols:
+        df_fam_surv[f"{f}_group"] = (
+            df_fam_surv[f] >= df_fam_surv[f].median()
+        ).map({True: "High", False: "Low"})
+
+
+
+    ########################################
+    # 25. KM PLOTS – PATHWAY FAMILY
+    ########################################
+
+    km_fam_dir = os.path.join(output_path, "KM_family")
+    os.makedirs(km_fam_dir, exist_ok=True)
+
+    def plot_km_family(df, family):
+        kmf = KaplanMeierFitter()
+        plt.figure(figsize=(5, 4))
+
+        for grp in ["High", "Low"]:
+            mask = df[f"{family}_group"] == grp
+            kmf.fit(
+                df.loc[mask, "time"],
+                df.loc[mask, "event"],
+                label=f"{family} {grp}"
+            )
+            kmf.plot_survival_function(ci_show=False)
+
+        g1 = df[f"{family}_group"] == "High"
+        g2 = df[f"{family}_group"] == "Low"
+
+        res = logrank_test(
+            df.loc[g1, "time"],
+            df.loc[g2, "time"],
+            df.loc[g1, "event"],
+            df.loc[g2, "event"]
+        )
+
+        plt.title(
+            f"{family}\nLog-rank p = {res.p_value:.2e}"
+        )
+        plt.xlabel("Days")
+        plt.ylabel("Overall Survival")
+
+        plt.tight_layout()
+        plt.savefig(
+            os.path.join(km_fam_dir, f"KM_{family}.pdf")
+        )
+        plt.close()
+
+    for fam in family_cols:
+        plot_km_family(df_fam_surv, fam)
+
+
+    ########################################
+    # 26. COX – PATHWAY FAMILY
+    ########################################
+
+    cox_family = []
+
+    for fam in family_cols:
+        df_tmp = df_fam_surv[["time", "event", fam]].dropna()
+        cph = CoxPHFitter()
+        cph.fit(
+            df_tmp,
+            duration_col="time",
+            event_col="event"
+        )
+
+        s = cph.summary.loc[fam]
+        cox_family.append({
+            "PathwayFamily": fam,
+            "HR": s["exp(coef)"],
+            "CI_lower": s["exp(coef) lower 95%"],
+            "CI_upper": s["exp(coef) upper 95%"],
+            "p": s["p"]
+        })
+
+    df_cox_family = (
+        pd.DataFrame(cox_family)
+        .sort_values("p")
+    )
+
+    df_cox_family.to_csv(
+        os.path.join(output_path, "cox_pathway_family.csv"),
+        index=False
+    )
+
+
+
+
+
+
+
+
+
+
+
+
+    ########################################
+    # 14. PLOT 3-LEVEL SANKEY
+    ########################################
+
+
+    # Unique labels
+    clusters = df_flows["Cluster"].unique().tolist()
+    pathways = df_flows["Pathway"].unique().tolist()
+    genes = df_flows["Gene"].unique().tolist()
+
+    labels = clusters + pathways + genes
+
+    label_to_id = {l: i for i, l in enumerate(labels)}
+
+    # Build links
+    source = []
+    target = []
+    value = []
+
+    # Cluster → Pathway
+    cp = df_flows.groupby(["Cluster", "Pathway"])["Value"].sum().reset_index()
+    for _, row in cp.iterrows():
+        source.append(label_to_id[row["Cluster"]])
+        target.append(label_to_id[row["Pathway"]])
+        value.append(row["Value"])
+
+    # Pathway → Gene
+    pg = df_flows.groupby(["Pathway", "Gene"])["Value"].sum().reset_index()
+    for _, row in pg.iterrows():
+        source.append(label_to_id[row["Pathway"]])
+        target.append(label_to_id[row["Gene"]])
+        value.append(row["Value"])
+
+    fig = go.Figure(
+        data=[
+            go.Sankey(
+                node=dict(
+                    label=labels,
+                    pad=15,
+                    thickness=15
+                ),
+                link=dict(
+                    source=source,
+                    target=target,
+                    value=value
+                )
+            )
+        ]
+    )
+
+    fig.update_layout(
+        title="Cluster → Pathway → Gene Sankey Diagram",
+        font_size=10
+    )
+
+    fig.write_html(
+        os.path.join(output_path, "cluster_pathway_gene_sankey.html")
+    )
+
+
+    # Load Sankey flow table (created earlier)
+    df_flows = pd.read_csv(
+        os.path.join(output_path, "sankey_cluster_pathway_gene.csv")
+    )
+
+    # Unique labels (ordered)
+    clusters = sorted(df_flows["Cluster"].unique().tolist())
+    pathways = sorted(df_flows["Pathway"].unique().tolist())
+    genes = sorted(df_flows["Gene"].unique().tolist())
+
+    labels = clusters + pathways + genes
+    label_to_id = {l: i for i, l in enumerate(labels)}
+
+
+    source = []
+    target = []
+    value = []
+
+    # Cluster → Pathway
+    cp = df_flows.groupby(["Cluster", "Pathway"])["Value"].sum().reset_index()
+    for _, r in cp.iterrows():
+        source.append(label_to_id[r["Cluster"]])
+        target.append(label_to_id[r["Pathway"]])
+        value.append(r["Value"])
+
+    # Pathway → Gene
+    pg = df_flows.groupby(["Pathway", "Gene"])["Value"].sum().reset_index()
+    for _, r in pg.iterrows():
+        source.append(label_to_id[r["Pathway"]])
+        target.append(label_to_id[r["Gene"]])
+        value.append(r["Value"])
+
+
+    # Example cluster colors (replace with yours if defined globally)
+    CLUSTER_COLORS = {
+        "Cluster 0": "#0077B6",
+        "Cluster 1": "#00B4D8",
+        "Cluster 2": "#48CAE4",
+        "Cluster 3": "#90DBF4",
+    }
+
+    node_colors = []
+
+    for lbl in labels:
+        if lbl in CLUSTER_COLORS:
+            node_colors.append(CLUSTER_COLORS[lbl])
+        elif lbl in pathways:
+            node_colors.append("#ADB5BD")   # pathway gray
+        else:
+            node_colors.append("#DEE2E6")   # gene light gray
+
+
+    fig = go.Figure(
+        data=[
+            go.Sankey(
+                arrangement="snap",
+                node=dict(
+                    label=labels,
+                    color=node_colors,
+                    pad=15,
+                    thickness=14,
+                    line=dict(color="black", width=0.3)
+                ),
+                link=dict(
+                    source=source,
+                    target=target,
+                    value=value
+                )
+            )
+        ]
+    )
+
+    fig.update_layout(
+        title=dict(
+            text="Cluster → Pathway → Gene Sankey Diagram",
+            x=0.5
+        ),
+        font=dict(
+            size=11,
+            family="Times New Roman"
+        ),
+        width=1200,
+        height=800,
+        margin=dict(l=20, r=20, t=40, b=20)
+    )
+
+
+    # Ensure output directory exists
+    os.makedirs(output_path, exist_ok=True)
+
+    fig.write_image(
+        os.path.join(output_path, "cluster_pathway_gene_sankey.svg"),
+        format="svg",
+        scale=2
+    )
+
+    fig.write_image(
+        os.path.join(output_path, "cluster_pathway_gene_sankey.pdf"),
+        format="pdf",
+        scale=2
+    )
+
+    print("✅ Sankey exported as SVG and PDF (publication-ready).")
+
+
+
+    ########################################
+    # PATHWAY → FAMILY MAPPING
+    ########################################
+
+    PATHWAY_FAMILY_MAP = {
+        "PI3K-AKT signaling pathway": "PI3K/AKT",
+        "mTOR signaling pathway": "PI3K/AKT",
+        "MAPK signaling pathway": "MAPK",
+        "ERK cascade": "MAPK",
+        "p53 signaling pathway": "Cell Cycle / DNA Damage",
+        "Cell cycle": "Cell Cycle / DNA Damage",
+        "DNA repair": "Cell Cycle / DNA Damage",
+    }
+
+    def map_to_family(pathway):
+        return PATHWAY_FAMILY_MAP.get(pathway, "Other")
+
+
+    ########################################
+    # LOAD & THRESHOLD FLOWS
+    ########################################
+
+    df = pd.read_csv(
+        os.path.join(output_path, "sankey_cluster_pathway_gene.csv")
+    )
+
+    # Threshold weak flows (global percentile)
+    THRESH_PERCENTILE = 75   # keep top 25%
+    threshold = np.percentile(df["Value"], THRESH_PERCENTILE)
+
+    df = df[df["Value"] >= threshold].copy()
+
+    # Map pathways to families
+    df["PathwayFamily"] = df["Pathway"].apply(map_to_family)
+
+
+    ########################################
+    # CLUSTER-SPECIFIC SANKEY FUNCTION
+    ########################################
+
+    def plot_cluster_sankey(
+        df_cluster,
+        cluster_name,
+        output_path
+    ):
+        # Node sets
+        families = sorted(df_cluster["PathwayFamily"].unique())
+        pathways = sorted(df_cluster["Pathway"].unique())
+        genes = sorted(df_cluster["Gene"].unique())
+
+        labels = [cluster_name] + families + pathways + genes
+        label_to_id = {l: i for i, l in enumerate(labels)}
+
+        source, target, value = [], [], []
+
+        # Cluster → Family
+        cf = df_cluster.groupby("PathwayFamily")["Value"].sum().reset_index()
+        for _, r in cf.iterrows():
+            source.append(label_to_id[cluster_name])
+            target.append(label_to_id[r["PathwayFamily"]])
+            value.append(r["Value"])
+
+        # Family → Pathway
+        fp = df_cluster.groupby(
+            ["PathwayFamily", "Pathway"]
+        )["Value"].sum().reset_index()
+        for _, r in fp.iterrows():
+            source.append(label_to_id[r["PathwayFamily"]])
+            target.append(label_to_id[r["Pathway"]])
+            value.append(r["Value"])
+
+        # Pathway → Gene
+        pg = df_cluster.groupby(
+            ["Pathway", "Gene"]
+        )["Value"].sum().reset_index()
+        for _, r in pg.iterrows():
+            source.append(label_to_id[r["Pathway"]])
+            target.append(label_to_id[r["Gene"]])
+            value.append(r["Value"])
+
+        # Colors
+        node_colors = []
+        for lbl in labels:
+            if lbl == cluster_name:
+                node_colors.append(CLUSTER_COLORS.get(cluster_name, "#0077B6"))
+            elif lbl in families:
+                node_colors.append("#ADB5BD")
+            elif lbl in pathways:
+                node_colors.append("#CED4DA")
+            else:
+                node_colors.append("#E9ECEF")
+
+        # Plot
+        fig = go.Figure(
+            go.Sankey(
+                arrangement="snap",
+                node=dict(
+                    label=labels,
+                    color=node_colors,
+                    pad=15,
+                    thickness=14,
+                    line=dict(color="black", width=0.3)
+                ),
+                link=dict(
+                    source=source,
+                    target=target,
+                    value=value
+                )
+            )
+        )
+
+        fig.update_layout(
+            title=f"{cluster_name}: Pathway–Gene Attribution",
+            font=dict(size=11, family="Times New Roman"),
+            width=1100,
+            height=750
+        )
+
+        # Export
+        fig.write_image(
+            os.path.join(output_path, f"sankey_{cluster_name}.svg"),
+            format="svg",
+            scale=2
+        )
+
+        fig.write_image(
+            os.path.join(output_path, f"sankey_{cluster_name}.pdf"),
+            format="pdf",
+            scale=2
+        )
+
+
+
+    ########################################
+    # GENERATE ALL CLUSTER SANKEYS
+    ########################################
+
+    for cluster in sorted(df["Cluster"].unique()):
+        df_c = df[df["Cluster"] == cluster]
+        plot_cluster_sankey(
+            df_cluster=df_c,
+            cluster_name=cluster,
+            output_path=output_path
+        )
+
+    print("✅ Cluster-specific Sankeys exported (SVG + PDF).")
     
-    # === Visualization
-    if visualize:
-        nx_graph = dgl.to_networkx(G_dgl)
-        plt.figure(figsize=(10, 10))
-        pos = nx.spring_layout(nx_graph, seed=42)
-        nx.draw_networkx_nodes(nx_graph, pos, node_size=50, node_color='skyblue')
-        nx.draw_networkx_edges(nx_graph, pos, alpha=0.2)
-        # Highlight top-k predicted edges in red
-        nx.draw_networkx_edges(nx_graph, pos, edgelist=top_edges, edge_color='red', width=2)
-        plt.title(f"Top-{top_k} Predicted Edges")
-        plt.show()
     
-    return top_edges
+    ########################################
+    # MAP GENES TO CLUSTERS
+    ########################################
+
+    
+
+    gene_cluster_map = defaultdict(list)
+
+    # saliency_pathway_matrix: [Pathway × Gene]
+    # bicluster.row_labels_: pathway → cluster
+
+    for p_idx, cluster_id in enumerate(bicluster.row_labels_):
+        gene_scores = saliency_pathway_matrix[p_idx]
+        top_genes = np.argsort(gene_scores)[::-1][:20]  # top genes per pathway
+
+        for g_idx in top_genes:
+            gene_cluster_map[cluster_id].append(g_idx)
+
+    # deduplicate
+    for c in gene_cluster_map:
+        gene_cluster_map[c] = list(set(gene_cluster_map[c]))
+
+
+
+    # df_surv = surv.join(patient_cluster_scores, how="inner")
+
+
+    ########################################
+    # PLOT KM CURVES (PER CLUSTER)
+    ########################################
+
+    os.makedirs(os.path.join(output_path, "survival"), exist_ok=True)
+
+    for cluster_id in patient_cluster_scores.columns:
+        df = df_surv.copy()
+
+        median_score = df[cluster_id].median()
+        df["group"] = df[cluster_id] >= median_score
+
+        kmf_high = KaplanMeierFitter()
+        kmf_low = KaplanMeierFitter()
+
+        plt.figure(figsize=(5, 4))
+
+        kmf_high.fit(
+            df[df["group"]]["time"],
+            df[df["group"]]["event"],
+            label="High activity"
+        )
+        kmf_low.fit(
+            df[~df["group"]]["time"],
+            df[~df["group"]]["event"],
+            label="Low activity"
+        )
+
+        kmf_high.plot(ci_show=False)
+        kmf_low.plot(ci_show=False)
+
+        # Log-rank test
+        result = logrank_test(
+            df[df["group"]]["time"],
+            df[~df["group"]]["time"],
+            df[df["group"]]["event"],
+            df[~df["group"]]["event"]
+        )
+
+        plt.title(
+            f"Cluster {cluster_id} Survival\n"
+            f"log-rank p = {result.p_value:.3e}"
+        )
+        plt.xlabel("Time (days)")
+        plt.ylabel("Survival probability")
+
+        plt.tight_layout()
+
+        # Export
+        plt.savefig(
+            os.path.join(
+                output_path,
+                "survival",
+                f"cluster_{cluster_id}_survival.svg"
+            )
+        )
+        plt.savefig(
+            os.path.join(
+                output_path,
+                "survival",
+                f"cluster_{cluster_id}_survival.pdf"
+            )
+        )
+        plt.close()
+
+    ########################################
+    # SAVE LOG-RANK P-VALUES
+    ########################################
+
+    results = []
+
+    for cluster_id in patient_cluster_scores.columns:
+        df = df_surv.copy()
+        median_score = df[cluster_id].median()
+        df["group"] = df[cluster_id] >= median_score
+
+        res = logrank_test(
+            df[df["group"]]["time"],
+            df[~df["group"]]["time"],
+            df[df["group"]]["event"],
+            df[~df["group"]]["event"]
+        )
+
+        results.append([cluster_id, res.p_value])
+
+    pd.DataFrame(
+        results,
+        columns=["Cluster", "LogRank_p"]
+    ).to_csv(
+        os.path.join(output_path, "survival", "cluster_survival_pvalues.csv"),
+        index=False
+    )
