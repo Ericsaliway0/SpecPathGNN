@@ -263,24 +263,79 @@ class MLPPredictor(nn.Module):
         x = F.relu(self.W1(edge_embed))
         return self.W2(x).squeeze(1)
 
-class MLPPredictor_(nn.Module):
-    def __init__(self, in_dim, hidden_dim):
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from dgl.nn import GATConv
+
+
+class GATNetModel(nn.Module):
+    def __init__(
+        self,
+        graph,
+        in_feats,
+        dim_latent,
+        num_layers=2,
+        num_heads=4,
+        dropout=0.3,
+        do_train=True
+    ):
         super().__init__()
-        self.mlp = nn.Sequential(
-            nn.Linear(in_dim * 2, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
+
+        self.graph = graph
+        self.do_train = do_train
+        self.dropout = nn.Dropout(dropout)
+        self.relu = nn.LeakyReLU()
+        self.num_heads = num_heads
+
+        # ----------------------------
+        # GAT layers
+        # ----------------------------
+
+        # First layer
+        self.conv_0 = GATConv(
+            in_feats,
+            dim_latent // num_heads,
+            num_heads=num_heads,
+            feat_drop=dropout,
+            attn_drop=dropout,
+            activation=None
         )
 
-    def apply_edges(self, edges):
-        h = torch.cat(
-            [edges.src['h'], edges.dst['h']],
-            dim=1
-        )
-        return {'score': self.mlp(h)}
+        # Hidden layers
+        self.layers = nn.ModuleList([
+            GATConv(
+                dim_latent,
+                dim_latent // num_heads,
+                num_heads=num_heads,
+                feat_drop=dropout,
+                attn_drop=dropout,
+                activation=None
+            )
+            for _ in range(num_layers - 1)
+        ])
 
-    def forward(self, g, h):
-        with g.local_scope():
-            g.ndata['h'] = h
-            g.apply_edges(self.apply_edges)
-            return g.edata['score']
+        # ----------------------------
+        # Link prediction head
+        # ----------------------------
+        self.predict = nn.Linear(dim_latent, 1)
+
+    def forward(self, graph, features):
+        # First GAT layer
+        h = self.conv_0(graph, features)
+        h = h.flatten(1)  # concatenate heads
+        h = self.relu(h)
+
+        # Additional layers
+        for conv in self.layers:
+            h = conv(graph, h)
+            h = h.flatten(1)
+            h = self.relu(h)
+            h = self.dropout(h)
+
+        # Encoder-only mode
+        if not self.do_train:
+            return h.detach()
+
+        logits = self.predict(h)
+        return logits
