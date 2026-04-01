@@ -45,7 +45,6 @@ The different dataset and KG used in this project are located in data directory.
 7. To train the model, run the following command:
    - `python prediction/main.py --num-layers 6 --lr 0.001 --input-size 2 --hidden-size 16 --epochs 10v`
 
-
 <p>
 If you find this project useful for your research, please cite it using the following BibTeX entries:
 </p>
