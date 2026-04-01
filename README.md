@@ -52,8 +52,6 @@ If you find this project useful for your research, please cite it using the foll
 </p>
 
 <pre><code>
-
-
 @article{LiMaIEEEAccess2026Pathway,
   author  = {Li, Sa and Ma, Tianle},
   title   = {Pathway Representation Learning for Interpretable Graph Neural Networks},
