@@ -46,18 +46,23 @@ The different dataset and KG used in this project are located in data directory.
    - `python prediction/main.py --num-layers 6 --lr 0.001 --input-size 2 --hidden-size 16 --epochs 10v`
 
 <h2>Citation</h2>
+
 <p>
-If you find this project useful for your research, please cite it using the following BibTeX entries:
+If you find this project useful for your research, please cite it using the following BibTeX entry:
 </p>
 
-@article{LiMaIEEEAccess2026Pathway,
-  author  = {Li, Sa and Ma, Tianle},
-  title   = {Pathway Representation Learning for Interpretable Graph Neural Networks},
-  journal = {IEEE Access},
-  volume  = {14},
-  pages   = {41979--41997},
-  year    = {2026},
-  doi     = {10.1109/ACCESS.2026.3673117},
-  keywords= {Biological information theory; Biology; Graph neural networks; Biological system modeling; Knowledge graphs; Adaptation models; Predictive models; Cancer; Topology; Proteins; pathway enrichment; knowledge graph embedding; attention mechanisms; interpretability; pathway significance}
+<pre><code>@inproceedings{LiMaACMBCB2025EmbedKG,
+  author    = {Li, Sa and Ma, Tianle},
+  title     = {Graph Neural Network with Pretrained Embeddings for Cancer and miRNA Regulator Discovery},
+  booktitle = {Proceedings of the 16th ACM International Conference on Bioinformatics, Computational Biology, and Health Informatics},
+  year      = {2025},
+  publisher = {Association for Computing Machinery},
+  address   = {New York, NY, USA},
+  articleno = {78},
+  numpages  = {1},
+  isbn      = {9798400722004},
+  doi       = {10.1145/3765612.3767778},
+  url       = {https://doi.org/10.1145/3765612.3767778},
+  abstract  = {Identifying cancer driver genes is essential for understanding tumorigenesis and developing targeted therapies. However, traditional approaches often struggle to integrate diverse biological data. This work presents EmbedKG, a knowledge graph-based framework integrating pretrained node embeddings and multi-omics data using an efficient Chebyshev-based GCN to identify cancer driver genes and predict miRNA regulators.}
 }
 </code></pre>
