@@ -1,6 +1,6 @@
-## Hierarchical Pathway Embeddings for Explainable Graph-Based Molecular Modeling
+## A Spectral Graph Learning Framework for Pathway-Level Prediction and Explainability
 
-This repository contains the code for our paper, "Hierarchical Pathway Embeddings for Explainable Graph-Based Molecular Modeling".
+This repository contains the code for our paper, "A Spectral Graph Learning Framework for Pathway-Level Prediction and Explainability".
 
 ![Alt text](images/framework.jpeg)
 
@@ -44,3 +44,20 @@ The different dataset and KG used in this project are located in data directory.
 
 7. To train the model, run the following command:
    - `python prediction/main.py --num-layers 6 --lr 0.001 --input-size 2 --hidden-size 16 --epochs 10v`
+
+
+<p>
+If you find this project useful for your research, please cite it using the following BibTeX entries:
+</p>
+
+@article{LiMaIEEEAccess2026Pathway,
+  author  = {Li, Sa and Ma, Tianle},
+  title   = {Pathway Representation Learning for Interpretable Graph Neural Networks},
+  journal = {IEEE Access},
+  volume  = {14},
+  pages   = {41979--41997},
+  year    = {2026},
+  doi     = {10.1109/ACCESS.2026.3673117},
+  keywords= {Biological information theory; Biology; Graph neural networks; Biological system modeling; Knowledge graphs; Adaptation models; Predictive models; Cancer; Topology; Proteins; pathway enrichment; knowledge graph embedding; attention mechanisms; interpretability; pathway significance}
+}
+</code></pre>
